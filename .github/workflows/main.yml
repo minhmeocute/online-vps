@@ -1,0 +1,164 @@
+name: Web Remote Desktop
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install flask flask-cors pillow numpy opencv-python pyautogui mss
+
+      - name: Create Python Script
+        run: |
+          $code = @'
+          from flask import Flask, Response, request, render_template_string
+          import pyautogui
+          from PIL import Image
+          import io
+          import base64
+          import numpy as np
+          import cv2
+          from mss import mss
+          import threading
+          from flask_cors import CORS
+
+          app = Flask(__name__)
+          CORS(app)
+          pyautogui.FAILSAFE = False
+          sct = mss()
+
+          HTML_TEMPLATE = """
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Remote Control</title>
+              <style>
+                  body { margin: 0; background: #1a1a1a; color: white; }
+                  #screen { max-width: 100%; height: auto; cursor: crosshair; }
+                  .container { padding: 20px; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <img id="screen" src="">
+              </div>
+              <script>
+                  const img = document.getElementById('screen');
+                  let isMouseDown = false;
+
+                  function updateImage() {
+                      fetch('/screen')
+                          .then(response => response.text())
+                          .then(data => {
+                              img.src = 'data:image/jpeg;base64,' + data;
+                              setTimeout(updateImage, 100);
+                          })
+                          .catch(err => setTimeout(updateImage, 1000));
+                  }
+
+                  function sendMouseEvent(type, x, y) {
+                      const rect = img.getBoundingClientRect();
+                      const scaleX = screen.width / rect.width;
+                      const scaleY = screen.height / rect.height;
+                      
+                      const realX = Math.round((x - rect.left) * scaleX);
+                      const realY = Math.round((y - rect.top) * scaleY);
+                      
+                      fetch('/mouse', {
+                          method: 'POST',
+                          headers: {'Content-Type': 'application/json'},
+                          body: JSON.stringify({type, x: realX, y: realY})
+                      });
+                  }
+
+                  img.addEventListener('mousedown', e => {
+                      isMouseDown = true;
+                      sendMouseEvent('down', e.clientX, e.clientY);
+                  });
+
+                  img.addEventListener('mousemove', e => {
+                      if (isMouseDown) sendMouseEvent('move', e.clientX, e.clientY);
+                  });
+
+                  img.addEventListener('mouseup', e => {
+                      isMouseDown = false;
+                      sendMouseEvent('up', e.clientX, e.clientY);
+                  });
+
+                  document.addEventListener('keydown', e => {
+                      fetch('/keyboard', {
+                          method: 'POST',
+                          headers: {'Content-Type': 'application/json'},
+                          body: JSON.stringify({type: 'press', key: e.key})
+                      });
+                  });
+
+                  updateImage();
+              </script>
+          </body>
+          </html>
+          """
+
+          @app.route('/')
+          def index():
+              return render_template_string(HTML_TEMPLATE)
+
+          @app.route('/screen')
+          def screen():
+              screenshot = sct.grab(sct.monitors[0])
+              img = Image.frombytes('RGB', (screenshot.width, screenshot.height), screenshot.rgb)
+              img = img.resize((1280, 720))
+              
+              # Convert to JPEG
+              buffer = io.BytesIO()
+              img.save(buffer, format='JPEG', quality=70)
+              img_str = base64.b64encode(buffer.getvalue()).decode()
+              return img_str
+
+          @app.route('/mouse', methods=['POST'])
+          def mouse():
+              data = request.json
+              x, y = data['x'], data['y']
+              
+              if data['type'] == 'down':
+                  pyautogui.mouseDown(x=x, y=y)
+              elif data['type'] == 'move':
+                  pyautogui.moveTo(x=x, y=y)
+              elif data['type'] == 'up':
+                  pyautogui.mouseUp(x=x, y=y)
+              
+              return 'OK'
+
+          @app.route('/keyboard', methods=['POST'])
+          def keyboard():
+              data = request.json
+              if data['type'] == 'press':
+                  pyautogui.press(data['key'])
+              return 'OK'
+
+          if __name__ == '__main__':
+              app.run(host='127.0.0.1', port=5000)
+          '@
+          Set-Content -Path "remote_desktop.py" -Value $code
+
+      - name: Download Cloudflared
+        run: |
+          Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+
+      - name: Start Python Server and Cloudflare Tunnel
+        run: |
+          Start-Process python -ArgumentList "remote_desktop.py" -NoNewWindow
+          Write-Output "Python server started..."
+          Start-Sleep -Seconds 5
+          Write-Output "Starting Cloudflare tunnel..."
+          Write-Output "============================"
+          Write-Output "Access your desktop through the URL shown below:"
+          Write-Output "============================"
+          ./cloudflared.exe tunnel --url http://127.0.0.1:5000
