@@ -13,15 +13,18 @@ jobs:
           
       - name: Install Dependencies
         run: |
-          pip install flask flask-socketio python-engineio==3.14.2 python-socketio==4.6.0 pyautogui opencv-python
+
+          pip install flask flask-socketio python-engineio==3.14.2 python-socketio==4.6.0 pyautogui opencv-python numpy pillow
           
       - name: Create Remote Access Server
         run: |
-          echo "import flask, flask_socketio, pyautogui, cv2, base64, io
+
+          echo "import flask, flask_socketio, pyautogui, cv2, base64, io, numpy
           from PIL import Image
           
           app = flask.Flask(__name__)
-          socketio = flask_socketio.SocketIO(app)
+
+          socketio = flask_socketio.SocketIO(app, cors_allowed_origins='*')
           
           @app.route('/')
           def index():
@@ -63,9 +66,13 @@ jobs:
                   socketio.emit('screen', base64.b64encode(buffer).decode())
                   socketio.sleep(0.1)
           
-          socketio.start_background_task(capture_screen)
-          socketio.run(app, host='127.0.0.1', port=5000)" > server.py
-          python server.py &
+
+
+
+          if __name__ == '__main__':
+              socketio.start_background_task(capture_screen)
+              socketio.run(app, host='0.0.0.0', port=5000)" > server.py
+          start /B python server.py
           
       - name: Install Cloudflared
         run: |
@@ -73,4 +80,5 @@ jobs:
           
       - name: Create Tunnel
         run: |
-          .\cloudflared.exe tunnel --url http://127.0.0.1:5000
+
+          .\cloudflared.exe tunnel --no-autoupdate --url http://localhost:5000
