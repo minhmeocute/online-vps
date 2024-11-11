@@ -5,102 +5,72 @@ on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v2
         with:
-          python-version: '3.8'
-
+          python-version: '3.x'
+          
       - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install flask mss pyautogui cloudflared
-
-      - name: Run Python Script
-        env:
-          CLOUDFLARE_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
+          pip install flask flask-socketio python-engineio==3.14.2 python-socketio==4.6.0 pyautogui opencv-python
+          
+      - name: Create Remote Access Server
         run: |
-          echo "
-import os
-import pyautogui
-from flask import Flask, render_template_string, request, jsonify
-from mss import mss
-import threading
-
-app = Flask(__name__)
-sct = mss()
-
-html_template = '''
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-  <meta charset='UTF-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-  <title>Remote Desktop</title>
-</head>
-<body>
-  <h1>Remote Desktop Control</h1>
-  <img id='screenshot' src='/screenshot' style='width:100%;' onclick='sendClick(event)' />
-  <script>
-    const interval = 1000;  // Refresh interval for screenshots
-    setInterval(() => {
-      document.getElementById('screenshot').src = '/screenshot?' + new Date().getTime();
-    }, interval);
-
-    function sendClick(event) {
-      const rect = event.target.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      fetch('/click', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ x: x, y: y })
-      });
-    }
-
-    document.addEventListener('keydown', (event) => {
-      fetch('/keypress', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ key: event.key })
-      });
-    });
-  </script>
-</body>
-</html>
-'''
-
-@app.route('/')
-def index():
-    return render_template_string(html_template)
-
-@app.route('/screenshot')
-def screenshot():
-    sct_img = sct.grab(sct.monitors[1])
-    return app.response_class(sct_img.bgra, mimetype='image/bmp')
-
-@app.route('/click', methods=['POST'])
-def click():
-    data = request.json
-    x, y = int(data['x']), int(data['y'])
-    pyautogui.click(x=x, y=y)
-    return jsonify(success=True)
-
-@app.route('/keypress', methods=['POST'])
-def keypress():
-    data = request.json
-    key = data['key']
-    pyautogui.press(key)
-    return jsonify(success=True)
-
-def run_app():
-    app.run(host='127.0.0.1', port=5000)
-
-# Start Flask app in a new thread
-threading.Thread(target=run_app).start()
-
-# Run Cloudflare tunnel
-os.system('cloudflared tunnel --url http://127.0.0.1:5000 --no-autoupdate')
-          " > main.py
-          python main.py
+          echo "import flask, flask_socketio, pyautogui, cv2, base64, io
+          from PIL import Image
+          
+          app = flask.Flask(__name__)
+          socketio = flask_socketio.SocketIO(app)
+          
+          @app.route('/')
+          def index():
+              return '''
+              <html>
+                <head>
+                  <script src='https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.3.0/socket.io.js'></script>
+                </head>
+                <body>
+                  <img id='screen' style='width:100%'>
+                  <script>
+                    var socket = io();
+                    socket.on('screen', function(data) {
+                      document.getElementById('screen').src = 'data:image/jpeg;base64,' + data;
+                    });
+                    document.addEventListener('mousemove', function(e) {
+                      socket.emit('mouse', {x: e.clientX, y: e.clientY});
+                    });
+                    document.addEventListener('keydown', function(e) {
+                      socket.emit('key', {key: e.key});
+                    });
+                  </script>
+                </body>
+              </html>
+              '''
+          
+          @socketio.on('mouse')
+          def mouse(data):
+              pyautogui.moveTo(data['x'], data['y'])
+              
+          @socketio.on('key')
+          def key(data):
+              pyautogui.press(data['key'])
+              
+          def capture_screen():
+              while True:
+                  screen = pyautogui.screenshot()
+                  _, buffer = cv2.imencode('.jpg', cv2.cvtColor(numpy.array(screen), cv2.COLOR_RGB2BGR))
+                  socketio.emit('screen', base64.b64encode(buffer).decode())
+                  socketio.sleep(0.1)
+          
+          socketio.start_background_task(capture_screen)
+          socketio.run(app, host='127.0.0.1', port=5000)" > server.py
+          python server.py &
+          
+      - name: Install Cloudflared
+        run: |
+          Invoke-WebRequest https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe -OutFile cloudflared.exe
+          
+      - name: Create Tunnel
+        run: |
+          .\cloudflared.exe tunnel --url http://127.0.0.1:5000
